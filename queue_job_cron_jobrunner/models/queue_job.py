@@ -164,9 +164,9 @@ class QueueJob(models.Model):
         """Short-lived job runner, triggered by async crons"""
         self._release_started_jobs(commit=commit)
         job = self._acquire_one_job(commit=commit)
-        while job:
-            job._process(commit=commit)
-            job = self._acquire_one_job(commit=commit)
+        job._process(commit=commit)
+        if self._acquire_one_job(commit=commit):
+            self._cron_trigger()
             # TODO: If limit_time_real_cron is reached before all the jobs are done,
             #       the worker will be killed abruptly.
             #       Ideally, find a way to know if we're close to reaching this limit,
