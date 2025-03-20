@@ -4,7 +4,7 @@
 
 import logging
 import traceback
-from datetime import datetime
+from datetime import datetime, timedelta
 from io import StringIO
 
 import psutil
@@ -164,17 +164,45 @@ class QueueJob(models.Model):
         """Short-lived job runner, triggered by async crons"""
         self._release_started_jobs(commit=commit)
         job = self._acquire_one_job(commit=commit)
+
         while job:
             job._process(commit=commit)
+
+            if self._stop_processing():
+                _logger.info(
+                    "Stop processing queue jobs in this "
+                    "ir.cron call, waiting next ir.cron call.",
+                )
+                return
+
             job = self._acquire_one_job(commit=commit)
-            # TODO: If limit_time_real_cron is reached before all the jobs are done,
-            #       the worker will be killed abruptly.
-            #       Ideally, find a way to know if we're close to reaching this limit,
-            #       stop processing, and trigger a new execution to continue.
-            #
-            # if job and limit_time_real_cron_reached_or_about_to_reach:
-            #     self._cron_trigger()
-            #     break
+
+    @api.model
+    def _stop_processing(self):
+        # If a queue_job_runner cron nextcall is already passed
+        # or in less than 5 seconds we stop processing queue job
+        # here to avoid to reach the limit_time_real_cron limit
+        next_cron_job_runner_trigger = (
+            self.env["ir.cron"]
+            .sudo()
+            .search(
+                [("queue_job_runner", "=", True)],
+                limit=1,
+                order="nextcall",
+            )
+        )
+        stop_processing_threshold_seconds = int(
+            self.env["ir.config_parameter"]
+            .sudo()
+            .get_param(
+                "queue_job_cron_jobrunner.stop_processing_threshold_seconds", "5"
+            )
+        )
+        if next_cron_job_runner_trigger.nextcall <= (
+            fields.Datetime.now() + timedelta(seconds=stop_processing_threshold_seconds)
+        ):
+            return True
+        return False
 
     @api.model
     def _cron_trigger(self, at=None):

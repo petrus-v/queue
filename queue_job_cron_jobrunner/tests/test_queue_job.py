@@ -2,7 +2,7 @@
 # @author Iván Todorovich <ivan.todorovich@camptocamp.com>
 # License AGPL-3.0 or later (https://www.gnu.org/licenses/agpl).
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from unittest import mock
 
 from freezegun import freeze_time
@@ -37,11 +37,29 @@ class TestQueueJob(TransactionCase):
         job3 = self.env["res.partner"].with_delay(eta=3600).create({"name": "Test"})
         job3_record = job3.db_record()
         # Run the job processing cron
+        self.cron.nextcall = datetime.now() + timedelta(seconds=600)
         self.env["queue.job"]._job_runner(commit=False)
         # Check that the jobs were processed
         self.assertEqual(job1_record.state, "done", "Processed OK")
         self.assertEqual(job2_record.state, "failed", "Has errors")
         self.assertEqual(job3_record.state, "pending", "Still pending, because of eta")
+
+    def test_stop_processing_job(self):
+        self.cron.nextcall = datetime(2022, 2, 22, 22, 22, 22)
+        self.env["ir.config_parameter"].set_param(
+            "queue_job_cron_jobrunner.stop_processing_threshold_seconds", "60"
+        )
+        job1 = self.env["res.partner"].with_delay().create({"name": "test"})
+        job1_record = job1.db_record()
+        job2 = self.env["res.partner"].with_delay().create({"name": "Test"})
+        job2_record = job2.db_record()
+        with freeze_time("2022-02-22 22:21:23"):
+            # Run the job processing cron, fist job is taken anyway
+            # second job depends if next call is soon here in 59s
+            # so stop starting new job waiting for the next cron thread
+            self.env["queue.job"]._job_runner(commit=False)
+        self.assertEqual(job1_record.state, "done", "Processed OK")
+        self.assertEqual(job2_record.state, "pending", "no time left to start it")
 
     @freeze_time("2022-02-22 22:22:22")
     def test_queue_job_cron_trigger_enqueue_dependencies(self):
@@ -53,6 +71,7 @@ class TestQueueJob(TransactionCase):
         job_record = delayable._generated_job.db_record()
         job_record_depends = delayable2._generated_job.db_record()
 
+        self.cron.nextcall = datetime(2022, 2, 22, 23, 23, 23)
         self.env["queue.job"]._job_runner(commit=False)
 
         self.assertEqual(job_record.state, "done", "Processed OK")
