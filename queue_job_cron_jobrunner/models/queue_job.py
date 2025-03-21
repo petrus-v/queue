@@ -13,6 +13,7 @@ from psycopg2 import OperationalError
 from odoo import _, api, fields, models, tools
 from odoo.service.model import PG_CONCURRENCY_ERRORS_TO_RETRY
 
+from odoo.addons.base.models.ir_cron import _intervalTypes
 from odoo.addons.queue_job.controllers.main import PG_RETRY
 from odoo.addons.queue_job.exception import (
     FailedJobError,
@@ -179,28 +180,53 @@ class QueueJob(models.Model):
 
     @api.model
     def _stop_processing(self):
-        # If a queue_job_runner cron nextcall is already passed
-        # or in less than 5 seconds we stop processing queue job
-        # here to avoid to reach the limit_time_real_cron limit
-        next_cron_job_runner_trigger = (
-            self.env["ir.cron"]
+        """compute what ever the next ir.cron call is going to be
+        trigger, if yes we stop processing queue job here
+
+        One of the goal is to mitigate that, when you have a long list of queue
+        job to process, the cron thread can be killed
+        by odoo.sh or odoo with the limit_time_real_cron limit.
+
+        We suggest to set ir cron interval lower to the limit_time_real_cron.
+        """
+        # In the current cursor (nor a new cursor) we can't see fresh nextcall which:
+        # is committed by Odoo at the end of the cron so we assume all crons are running
+        # so nextcall is the current started date
+        next_calls = [
+            cron.nextcall + _intervalTypes[cron.interval_type](cron.interval_number)
+            for cron in self.env["ir.cron"]
             .sudo()
-            .search(
-                [("queue_job_runner", "=", True)],
-                limit=1,
-                order="nextcall",
-            )
-        )
+            .search([("queue_job_runner", "=", True)])
+        ]
+        if not next_calls:
+            _logger.info("Stopping queue job processing, no nextcall found.")
+            return True
+
+        next_cron_job_runner_trigger_date = min(next_calls)
+
         stop_processing_threshold_seconds = int(
             self.env["ir.config_parameter"]
             .sudo()
             .get_param(
-                "queue_job_cron_jobrunner.stop_processing_threshold_seconds", "5"
+                "queue_job_cron_jobrunner.stop_processing_threshold_seconds",
+                "0",
             )
         )
-        if next_cron_job_runner_trigger.nextcall <= (
-            fields.Datetime.now() + timedelta(seconds=stop_processing_threshold_seconds)
-        ):
+        end_process_queue_job_date = next_cron_job_runner_trigger_date - timedelta(
+            seconds=stop_processing_threshold_seconds
+        )
+        now = fields.Datetime.now()
+        # TODO debug
+        _logger.info(
+            "now: %s - estimated cron nextcall: %s - "
+            "Threshold: %ss"
+            "stop processing new job after %s",
+            now,
+            next_cron_job_runner_trigger_date,
+            stop_processing_threshold_seconds,
+            end_process_queue_job_date,
+        )
+        if now >= end_process_queue_job_date:
             return True
         return False
 
